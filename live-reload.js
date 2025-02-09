@@ -1,7 +1,6 @@
 const evtSource = new EventSource("/updates");
 let lastUpdate = "";
 
-// hi
 evtSource.onmessage = (e) => {
   if (lastUpdate === "") {
     lastUpdate = e.data;

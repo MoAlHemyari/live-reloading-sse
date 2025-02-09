@@ -1,109 +1,79 @@
 package main
 
 import (
-	"net/http"
-	"log"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"time"
-	"sync"
-	"strings"
+    "log"
+    "net/http"
+    "os"
+    "path/filepath"
+    "strings"
+    "sync"
+    "time"
+    "os/exec"
 )
 
 var (
-	lastModTime time.Time 
-	mu	    sync.Mutex
+    lastModTime = time.Time{}
+    mu sync.Mutex
+    root = "../"
+    extensions = []string{".html", ".css", ".js", ".ts"}
 )
 
-func findFiles(root string, extensions []string, excludeDir string) ([]string, error) {
+func findFiles(root string, exts []string) ([]string, error) {
     var files []string
-
     err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-        if err != nil {
-            return err
-        }
-
-        if strings.HasPrefix(path, excludeDir) {
-            if info.IsDir() {
-                return filepath.SkipDir
-            }
+        if err != nil || info.IsDir() || strings.Contains(path, "live") {
             return nil
         }
-
-        if !info.IsDir() {
-            for _, ext := range extensions {
-                if filepath.Ext(path) == ext {
-                    files = append(files, path)
-                    break
-                }
+        for _, ext := range exts {
+            if filepath.Ext(path) == ext {
+                files = append(files, path)
             }
         }
-
         return nil
     })
-
-    if err != nil {
-        return nil, err
-    }
-    return files, nil
+    return files, err
 }
 
 func watchFiles() {
-	extensions := []string{".html", ".css", ".js", ".ts"}
-
-	excludeDir, err := filepath.Abs(filepath.Dir(os.Args[0]))
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	files, err := findFiles("../", extensions, excludeDir)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	modTimes := make(map[string]time.Time)
-	for _, file := range files {
-		info, err := os.Stat(file)
-		if err != nil {
-			log.Fatal(err)
-		}
-		modTimes[file] = info.ModTime()
-	}
-
-	for {
-		time.Sleep(1 * time.Second)
-		for _, file := range files {
-			info, err := os.Stat(file)
-			if err != nil {
-				log.Fatal(err)
-			}
-			if info.ModTime() != modTimes[file] {
-				log.Println("File Changed: ", file)
-				modTimes[file] = info.ModTime()
-			
-				if filepath.Ext(file) == ".ts" {
-					log.Println("Running tsc for: ", file)
-					runTSC(file)
-				} else {
-					mu.Lock()
-					lastModTime = info.ModTime()
-					mu.Unlock()
-				}
-			}
-		}
-	}
-}
-
-func runTSC(file string) {
-	cmd := exec.Command("tsc", file)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	err := cmd.Run()
-	if err != nil {
-		log.Println("Error running tsc: ", err)
-	}
+    files, _ := findFiles(root, extensions)
+    modTimes := make(map[string]time.Time)
+    
+    // initialize modTimes with current values
+    for _, file := range files {
+        if info, err := os.Stat(file); err == nil {
+            modTimes[file] = info.ModTime()
+        }
+    }
+    
+    for {
+		var isChanged bool
+        for _, file := range files {
+            info, _ := os.Stat(file)
+            if info.ModTime() != modTimes[file] {
+				isChanged = true
+                log.Println("File changed:", file)
+                modTimes[file] = info.ModTime()
+                
+                if filepath.Ext(file) == ".ts" {
+                    log.Println("Compiling TypeScript project")
+                    cmd := exec.Command("tsc", "--project", "../tsconfig.json")
+                    if err := cmd.Run(); err != nil {
+                        log.Println("TypeScript compilation error:", err)
+                    }
+                }
+                
+                mu.Lock()
+                lastModTime = info.ModTime()
+                mu.Unlock()
+            }
+        }
+		sleepTime := 1 * time.Second
+		if isChanged {
+			sleepTime = 4 * time.Second
+		} 
+		time.Sleep(sleepTime)
+		
+    }
 }
 
 func updatesHandler(w http.ResponseWriter, r *http.Request) {
@@ -111,49 +81,51 @@ func updatesHandler(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Cache-Control", "no-cache")
     w.Header().Set("Connection", "keep-alive")
 
-    var lastEvent string
+    lastEvent := ""
     for {
-        mu.Lock()
-        currentUpdate := lastModTime.String()
+        mu.Lock() 
+        current := lastModTime.String()
         mu.Unlock()
 
-        if currentUpdate != lastEvent {
-            _, err := w.Write([]byte("data: " + currentUpdate + "\n\n"))
-            if err != nil {
-                if isBrokenPipe(err) {
-                    log.Println("Page has reloaded")
-                } else {
-                    log.Println("SSE error:", err)
-                }
-                return
-            }
-            if flusher, ok := w.(http.Flusher); ok {
-                flusher.Flush()
-            } else {
-                log.Println("Streaming unsupported")
-                return
-            }
+		if strings.Contains(current, ".ts") {
+			log.Println("TypeScript file changed, sending reload event to client")
+			continue
+		}
 
-            lastEvent = currentUpdate
+        if current != lastEvent {
+			log.Println("Sending update event to client")
+            w.Write([]byte("data: " + current + "\n\n"))
+            if f, ok := w.(http.Flusher); ok {
+                f.Flush()
+            }
+            lastEvent = current
         }
-
-        time.Sleep(1 * time.Second)
+        time.Sleep(3 * time.Second)
     }
-}
-
-func isBrokenPipe(err error) bool {
-    return err != nil && (strings.Contains(err.Error(), "broken pipe") || strings.Contains(err.Error(), "reset by peer"))
 }
 
 func main() {
-    http.Handle("/", http.FileServer(http.Dir("../")))
-    http.Handle("/live-reload.js", http.FileServer(http.Dir("./")))
-    http.HandleFunc("/updates", updatesHandler)
-    go watchFiles()
-    log.Println("Server started at http://localhost:8080")
-    err := http.ListenAndServe(":8080", nil)
-    if err != nil {
-        log.Fatal(err)
+    var rootDir string
+    filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+        if !info.IsDir() && filepath.Base(path) == "index.html" {
+            rootDir = filepath.Dir(path)
+            return filepath.SkipAll
+        }
+        return nil
+    })
+    if rootDir == "" {
+        rootDir = root
     }
-    select {}
+    
+    http.Handle("/", http.FileServer(http.Dir(rootDir)))
+    http.HandleFunc("/live-reload.js", func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "application/javascript")
+        http.ServeFile(w, r, "live-reload.js")
+    })
+    http.HandleFunc("/updates", updatesHandler)
+
+    go watchFiles()
+    
+	log.Println("Server started at http://localhost:8080")
+    http.ListenAndServe(":8080", nil)
 }
