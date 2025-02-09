@@ -1,15 +1,15 @@
 const evtSource = new EventSource("/updates");
-const a = "hay"
 let lastUpdate = "";
 
-evtSource.onmessage = (event) => {
+// hi
+evtSource.onmessage = (e) => {
   if (lastUpdate === "") {
-    lastUpdate = event.data;
+    lastUpdate = e.data;
     return;
   }
-  if (event.data !== lastUpdate) {
+  if (e.data !== lastUpdate) {
     evtSource.close();
-    lastUpdate = event.data;
+    lastUpdate = e.data;
     location.reload();
   }
 };

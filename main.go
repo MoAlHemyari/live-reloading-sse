@@ -24,7 +24,7 @@ func findFiles(root string, extensions []string, excludeDir string) ([]string, e
             return err
         }
 
-        if strings.HasPrefix(path, excludeDir) && filepath.Base(path) != "live-reload.js" {
+        if strings.HasPrefix(path, excludeDir) {
             if info.IsDir() {
                 return filepath.SkipDir
             }
